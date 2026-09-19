@@ -1,0 +1,39 @@
+[project]
+name = "bcp"
+version = "0.1.0"
+description = "BrowseComp-Plus with a cheap LLM and Jev (TypeSafe's non-generative classifier): agent pipeline, jevlog language, experiments."
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.27",
+    "pyarrow>=17",
+    "huggingface_hub>=0.25",
+    "rank-bm25>=0.2.2",
+    "bm25s>=0.3.11",
+    "numpy>=2.5.3",
+]
+
+[dependency-groups]
+dev = [
+    "modal>=1.5.5",
+    "pytest>=8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 200
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501", "E731"]  # long lines and small lambdas are the house style here
+
+[tool.ruff.lint.per-file-ignores]
+"src/bcp/judge.py" = ["W291"]  # the grader prompt is the benchmark authors' text, byte for byte

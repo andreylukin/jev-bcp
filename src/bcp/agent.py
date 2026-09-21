@@ -42,6 +42,7 @@ EXCERPT_DOCS = 40  # new docs per round whose window is cut into excerpts and gr
 EXCERPT_CHARS = 32_000  # reader input per round, the size of 8 windows
 FINAL_NOTES = True  # the strict check sees the agent's notes beside the passages (replay.py)
 FINAL_SEARCH = False  # a rejected answer triggers new queries before the redo (replay.py)
+EXTRA = []  # retrievers beside BM25 and dense: anything with search_many(queries, k) (modal_app.py --colbert, --hop)
 DEEP = 8  # new docs per round that get every window graded, to pick the passage shown. More does not improve the
 # doc ranking (rank.py: gold recall in top 8 is 0.75 at any depth, all windows of all docs included, at up to 9x the tokens)
 DEADLINE = 240  # seconds of searching per question, then straight to the final stage: an input that reaches Modal's
@@ -153,8 +154,9 @@ def search(queries: list[str], corpus: Corpus, dense, bm25: bool, skip) -> dict[
     so no score fusion is needed."""
     found: dict[str, str] = {}
     dense_hits = dense.search_many(queries, HITS) if dense and queries else [[] for _ in queries]
-    for q, dh in zip(queries, dense_hits):
-        for d in (corpus.search(q, HITS) if bm25 else []) + dh:
+    extra_hits = [x.search_many(queries, HITS) for x in EXTRA] if queries else []
+    for i, (q, dh) in enumerate(zip(queries, dense_hits)):
+        for d in (corpus.search(q, HITS) if bm25 else []) + dh + [d for hits in extra_hits for d in hits[i]]:
             if d not in skip and d not in found:
                 found[d] = q
     return found

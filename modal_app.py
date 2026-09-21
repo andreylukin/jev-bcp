@@ -13,6 +13,7 @@ account limit) and ~55k to the LLM, so `--concurrency` questions in flight is th
 
 import json
 import os
+import threading
 from pathlib import Path
 
 import modal
@@ -26,6 +27,15 @@ image = (
 )
 volume = modal.Volume.from_name("jev-bcp-data", create_if_missing=True)
 secret = modal.Secret.from_dict({k: os.environ.get(k, "") for k in ("TYPESAFE_API_KEY", "OPENROUTER_API_KEY")})
+
+
+class Colbert:
+    """Reason-ModernColBERT as a third index (modal_colbert.py, deployed): +13 points of gold recall in the top 100 (lateint.py)."""
+
+    def search_many(self, queries: list[str], k: int) -> list[list[str]]:
+        return modal.Cls.from_name("jev-bcp-colbert", "Searcher")().search.remote(queries, k)
+
+
 PER_CONTAINER = 16  # questions in flight per container (threads; the work is network-bound)
 
 
@@ -59,15 +69,22 @@ class Worker:
         self.corpus = Corpus()
         self.dense = Dense()
         self.client = httpx.Client(timeout=120)
+        self.hop, self.lock = None, threading.Lock()
 
     @modal.method()
-    def run(self, qid: str, model: str, reasoning: str, retriever: str, use_jev: bool, use_grid: bool, use_final: bool, use_excerpts: bool = False, recursive: bool = False, roles: bool = False) -> dict:
+    def run(self, qid: str, model: str, reasoning: str, retriever: str, use_jev: bool, use_grid: bool, use_final: bool, use_excerpts: bool = False, recursive: bool = False, roles: bool = False, colbert: bool = False, hop: bool = False) -> dict:
         from bcp import agent
 
         agent.LLM_MODEL = model
         agent.EXCERPTS = use_excerpts
         agent.RECURSIVE = recursive
         agent.SPLIT = roles
+        with self.lock:  # 16 questions share the container: build the card store once
+            if hop and not self.hop:
+                from bcp.hop import Hop
+
+                self.hop = Hop(self.corpus, self.dense)  # the card store (cards.py): card search + entity hop
+        agent.EXTRA = [Colbert()] * colbert + [self.hop] * hop
         agent.REASONING = {"effort": reasoning} if reasoning else {"enabled": False}
         dense = self.dense if retriever != "bm25" else None
         return agent.run_one(self.cases[qid], self.corpus, self.client, use_jev, dense, retriever, use_grid, use_final)
@@ -75,7 +92,7 @@ class Worker:
 
 @app.local_entrypoint()
 def main(model: str, split: str = "dev", retriever: str = "hybrid", reasoning: str = "", no_jev: bool = False, grid: bool = False, no_final: bool = False,
-         excerpts: bool = False, recursive: bool = False, roles: bool = False, limit: int = 0, out: str = "", concurrency: int = 32):
+         excerpts: bool = False, recursive: bool = False, roles: bool = False, colbert: bool = False, hop: bool = False, limit: int = 0, out: str = "", concurrency: int = 32):
     import time
 
     from bcp.agent import summarize
@@ -95,7 +112,7 @@ def main(model: str, split: str = "dev", retriever: str = "hybrid", reasoning: s
     worker = Worker.with_options(max_containers=max(1, -(-concurrency // PER_CONTAINER)))()
     t0 = time.time()
     with rows_path.open("a") as f:
-        for row in worker.run.map(todo, kwargs=dict(model=model, reasoning=reasoning, retriever=retriever, use_jev=not no_jev, use_grid=grid, use_final=not no_final, use_excerpts=excerpts, recursive=recursive, roles=roles),
+        for row in worker.run.map(todo, kwargs=dict(model=model, reasoning=reasoning, retriever=retriever, use_jev=not no_jev, use_grid=grid, use_final=not no_final, use_excerpts=excerpts, recursive=recursive, roles=roles, colbert=colbert, hop=hop),
                                   order_outputs=False, return_exceptions=True):
             if isinstance(row, Exception):  # a question over the 15-minute per-input timeout; recorded below
                 continue
@@ -107,7 +124,7 @@ def main(model: str, split: str = "dev", retriever: str = "hybrid", reasoning: s
     gold = {c.qid: c.answer for c in cases}
     for qid in set(todo) - {r["qid"] for r in rows}:  # hung LLM calls: counted as wrong, never dropped
         rows.append({"qid": qid, "gold": gold[qid], "correct": False, "error": "timeout"})
-    summary = summarize(rows, {"split": split, "jev": not no_jev, "grid": grid, "final": not no_final, "excerpts": excerpts, "recursive": recursive, "roles": roles, "retriever": retriever, "model": model,
+    summary = summarize(rows, {"split": split, "jev": not no_jev, "grid": grid, "final": not no_final, "excerpts": excerpts, "recursive": recursive, "roles": roles, "colbert": colbert, "hop": hop, "retriever": retriever, "model": model,
                                "reasoning": reasoning or "off", "concurrency": concurrency, "wall_secs": time.time() - t0})
     (out_dir / "results.json").write_text(json.dumps({"summary": summary, "rows": rows}, indent=1))
     print(json.dumps(summary, indent=1))

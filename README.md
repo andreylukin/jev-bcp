@@ -20,14 +20,24 @@ multi-hop questions over a fixed corpus of 100,195 web pages. The benchmark has 
 
 | System | Split | Accuracy | Notes |
 |---|---|---|---|
+| **4 flash trajectories + Jev, GPT-5 reads only where they disagree** (`route.py`) | held-out 630 | **89.8%** [87.5, 92.1] | GPT-5 reads 27.5% of the questions, once; 0 errors; ~13 cents per question |
+| The same | all 830 | 89.8% [87.7, 91.8] | 745 of 830 |
+| **4 flash trajectories + Jev, no strong model** (`bestofn.py`) | held-out 630 | **87.0%** [84.4, 89.7] | the answer cluster with the largest summed strict score; ~10 cents per question |
+| One flash trajectory, ColBERT as a third index (`modal_app.py --colbert`) | held-out 630 | 81.0 - 82.5% | four runs; 0 errors |
 | DeepSeek-V4-flash + BM25 + Jev grading (first version) | all 830 | 55.8% | level with the paper's GPT-5 + BM25 row (55.9%) |
-| **DeepSeek-V4-flash + Jev pipeline** (`agent.py`) | held-out 630 | **79.5%** [76.5, 82.5] | 0 errors, ~2.5 cents and ~60 s per question |
+| DeepSeek-V4-flash + Jev pipeline (`agent.py`), BM25 + dense only | held-out 630 | 79.5% [76.5, 82.5] | 0 errors, ~2.5 cents and ~60 s per question |
 | The same with **jevlog** on top (`jevlog.py`) | held-out 630 | 78.9% [75.7, 82.1] | parity on accuracy; adds a proof and a calibrated confidence |
 | The same pipeline | dev 200 | 80.0% [74.5, 85.0] | |
 | **Ministral 8B + Jev**, one small job per call (`split.py`) | dev 200 | 64.5% [58, 71] | the same model as the whole agent: about 39% |
 
 For scale, on the public leaderboard at the time of writing: best entry 95.2% (GPT-5 multi-agent), GPT-5 +
-Qwen3-Embed-8B 71.7%, best open model of 32B or less 68.9%.
+Qwen3-Embed-8B 71.7% (70.1% in the paper), GPT-5 + BM25 55.9%, GPT-5 + Reason-ModernColBERT 79.5% with the standard
+scaffold and 87.6% with a `get_document` tool (LightOn), best open model of 32B or less 68.9%. The routed system uses
+the same `openai/gpt-5` (reasoning medium) on about a quarter of the questions. Its interval only just clears 87.6%:
+"matches or beats the best GPT-5 row" is the claim the data supports.
+
+On the held-out run the four trajectories agreed on 457 of 630 questions and were right on 95.6% of those; GPT-5's
+reads of the other 173 fixed 31 answers and broke 13 (+2.9 points [+0.8, +4.9] over the cheap pick).
 
 jevlog's confidence on the held-out run: answers scored 0.7 or higher were right 91% of the time (277
 answers); answers scored below 0.5 were right 66% of the time (219 answers).
@@ -41,6 +51,9 @@ answers); answers scored below 0.5 were right 66% of the time (219 answers).
 | + final stage: Jev strictly checks the answer, a rejection triggers a fresh read | ~70% |
 | + Jev grades every window of a long page and picks the one the reader sees | 75% |
 | + the final read uses the best windows of everything Jev graded; crash fixes | 80% |
+| + Reason-ModernColBERT as a third index (gold docs in the top 100: 72% -> 85%) | 81.4% (four runs) |
+| + four trajectories, keep the answer cluster with the largest summed strict score | 85.5% |
+| + where the four disagree, one GPT-5 read of their pooled evidence | 89.5% |
 
 ## How the pipeline works
 
@@ -76,6 +89,23 @@ Jev's roles, each validated on labelled data before it was wired in:
   the answer and the best passages. It ranks right above wrong answers with AUC 0.90. As a probability it is
   far too harsh (answers it scores under 0.1 are still right about half the time), so it is used as a
   ranking and a redo trigger, never as a stop rule for search.
+
+### Four trajectories and a routed strong reader (`bestofn.py`, `route.py`)
+
+Reruns of the same pipeline search differently and end on different evidence, so their errors are only partly shared:
+on dev any one of four runs is right on 91.5% of questions while a single run is right on 81%. Two label-free steps
+turn that into accuracy:
+
+1. **Select.** Jev groups the four answers ("do these name the same thing?"). Each run already carries its own strict
+   check score; the cluster with the largest sum wins. 80.0% -> 85.5% on dev (fixed 12, broke 1); majority voting
+   gets 85.0%; re-checking every answer against one shared evidence set is a null (82.0%).
+2. **Route.** One cluster: keep it (right ~95% of the time). More than one: a strong model reads, once and blind,
+   the best 24 windows of every page any run read, graded by Jev. With GPT-5: 85.5% -> 89.5% on dev (fixed 9,
+   broke 1). The control shows the gain is the reader and not the pooled evidence: flash doing the identical read
+   scores 82.5% (fixed 5, broke 11). Showing GPT-5 the four answers does not help (89.0%).
+
+GPT-5 as the whole agent costs 17.5 cents per question for one trajectory and was level with flash on a 30-question
+sample (26 vs 23-27 of 30); routed, it costs 2.2 cents per question on average.
 
 ### The small-model shape (`split.py`)
 
@@ -150,6 +180,11 @@ Kept in the repo because a documented null result is worth more than a forgotten
 | Whole documents per claim; small high-precision packet | flat; the small packet matches at 1/4 the reading cost | `claimsweep.py` |
 | Variable profiles; rank fusion over claims | gold in top 40 on the hardest questions: 28% -> 9%; 14% | `claimsweep.py`, `scripts/rrf.py` |
 | 16 search rounds instead of 8 | 13/40 vs 14/40 (control rerun) | `scripts/rounds.py` |
+| Sail-shaped loop: an orchestrator that never reads, single-page readers that name bridge entities | 20/40 vs 23/40 at 4x the cost; the readers dropped 95% of what Jev kept, the same failure as `atoms.py` | `swarm.py` |
+| Corpus-wide card store (an LLM card per page): card search + entity hop as two more retrievers | every gold doc in the first round's pool 27% -> 53%; one frozen read 65.5% -> 77.5%; **in the agent 80.0 / 82.5% vs 81.4%** at 1.75x the Jev tokens | `cards.py`, `hop.py`, `store3.py` |
+| Jev instead of the LLM for entity extraction (regex proposes names, Jev filters) | gold in the hop pool 93.6% vs 95.6%, pool 25% larger, ~8x the cost of LLM cards | `jevents.py` |
+| Four trajectories written with different search styles | the same as four plain reruns; hard core 0 of 60 trajectories | `bestofn.py --gen` |
+| Every candidate answer strict-checked against one shared evidence set | 82.0% vs 85.5% for each run's own score | `bestofn.py` |
 
 ### What the failures add up to
 
@@ -161,9 +196,12 @@ Kept in the repo because a documented null result is worth more than a forgotten
   A deep unnamed search finds 72% of those pages; Jev's whole-question grade then ranks them out.
 - Two independent reads agreeing: the answer is right 92% of the time (flash) or 82% (8B); disagreeing:
   about 32%. It is the best wrong-answer detector here, and same-model rereads do not repair what it finds.
-- So in this architecture cheap readers cap out below 95%. The untested lever is an offline, corpus-wide
-  entity index (`store.py` reached 92-98% of gold pages on a small testbed; `store2.py`, the test against
-  hard negatives, was never finished).
+- So in this architecture cheap readers cap out below 95%. The offline, corpus-wide entity index has now been built
+  and tested (`store2.py` against hard negatives: gold docs in Jev's top 40 63% -> 93%): it is the fifth change that
+  put far more gold pages in front of the agent without moving its accuracy. Retrieval is not this agent's
+  bottleneck; reading is. The two things that did move accuracy are selection across independent trajectories and a
+  stronger reader on the questions where they disagree, which is also the only thing that touched the hard core
+  (1 -> 4 of 15 on dev).
 
 ## Layout
 
@@ -177,12 +215,15 @@ src/bcp/
   agent.py      the pipeline; `llm()` is the one OpenRouter / self-hosted chat client
   final.py      strict check + redo
   split.py      the small-model pipeline
+  bestofn.py    N trajectories, label-free selectors
+  route.py      the published system: cluster the trajectories' answers, keep or send to a strong reader
   jevlog.py     the language: parser, compiler prompt, runtime, runner
   jevdiag.py    why a jevlog run lost its questions: never proposed vs proposed-not-picked
   metrics.py    AUC, nDCG, ECE, bootstrap and paired bootstrap
   run.py        the first experiment: Jev vs BM25 vs length on evidence vs hard negatives
   ...           one file per experiment; each docstring states the question, the method and the result
-modal_app.py    the agent on Modal (a 200-question run in ~10 minutes)
+modal_app.py    the agent on Modal (a 200-question run in ~10 minutes); --colbert, --hop add retrievers
+modal_colbert.py  Reason-ModernColBERT search on a Modal GPU, over LightOn's prebuilt index
 modal_llm.py    a small model served with vLLM on Modal, OpenAI-compatible
 scripts/        one-off experiment scripts kept for reproducibility
 tests/          network-free unit tests
@@ -191,7 +232,9 @@ tests/          network-free unit tests
 Experiments by question: `arms.py` (request shape), `oracle.py` (reader ceiling), `recall.py`
 (query-writer recall), `cells.py` (grid offline), `replay.py` (final-stage variants), `agree.py` (two
 readers), `rank.py` / `atoms.py` / `snip.py` (ranking and reader input), `store.py` / `store2.py` (offline
-knowledge store), `widerread.py` / `claimsweep.py` (evidence delivery).
+knowledge store), `widerread.py` / `claimsweep.py` (evidence delivery), `lateint.py` (late-interaction recall),
+`cards.py` / `hop.py` / `store3.py` / `jevents.py` (corpus-wide card store and entity hop), `swarm.py` (orchestrator +
+single-page readers), `bestofn.py` / `route.py` (trajectory selection and the routed reader).
 
 ## Setup
 
@@ -216,6 +259,12 @@ modal run modal_app.py --model deepseek/deepseek-v4-flash-0731                  
 modal run modal_app.py --model deepseek/deepseek-v4-flash-0731 --split held     # held-out 630
 modal run modal_app.py --model mistralai/ministral-8b-2512 --roles              # small-model pipeline
 
+# the published system: four trajectories, ONE run at a time (two at once hit Jev's rate limit), then route
+modal run modal_colbert.py::prepare && COLBERT_WARM=6 modal deploy modal_colbert.py   # redeploy with 0 afterwards
+for i in 1 2 3 4; do modal run modal_app.py --model deepseek/deepseek-v4-flash-0731 --split held --colbert --out out/held_cb_$i; done
+uv run python -m bcp.route --final --split held --runs out/held_cb_1 out/held_cb_2 out/held_cb_3 out/held_cb_4 \
+    --strong openai/gpt-5 --reasoning medium --out out/publish/held
+
 # jevlog on top of the pipeline; the agent stage is cached per question, so language changes are paired
 uv run python -m bcp.jevlog --model deepseek/deepseek-v4-flash-0731 --evidence agent --n 60
 uv run python -m bcp.jevlog --model deepseek/deepseek-v4-flash-0731 --evidence agent --split held --n 630 \
@@ -234,6 +283,9 @@ at a self-hosted OpenAI-compatible server instead.
 | LLM calls / input tokens | ~8 / ~55k | ~15 / ~141k |
 | Jev tokens | ~510k (2.1 cents) | ~640k (2.7 cents) |
 
+The routed system: four trajectories 10.2 cents; a GPT-5 read is ~21k tokens in and ~5k out (7.8 cents) on 27.5% of the
+questions, 2.2 cents on average; Jev grading the pooled evidence for those questions 0.9 cents. 13 cents in all.
+
 Throughput is set by Jev's 250k tokens per second, not by compute. On Modal, one question reaching the
 per-input timeout kills its container and the other questions in it, so `agent.DEADLINE` ends the search
 well before that.
@@ -247,6 +299,8 @@ well before that.
   (`out/jevlog_seeds`) or rerun with a control arm.
 - **Validate, then wire in.** Each Jev use was first measured against labels (evidence vs hard negatives,
   right vs wrong answers) before it touched the pipeline.
+- **Operational.** Two Modal runs at once exceed Jev's rate limit (errors count as wrong); a `map` over an empty
+  to-do list never returns; the ColBERT searcher needs warm containers during a run (`COLBERT_WARM`).
 - **Deviation from the paper's setup:** the judge is the official model and prompt, called through
   OpenRouter instead of a local vLLM.
 

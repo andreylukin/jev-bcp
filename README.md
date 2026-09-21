@@ -22,6 +22,7 @@ multi-hop questions over a fixed corpus of 100,195 web pages. The benchmark has 
 |---|---|---|---|
 | **4 flash trajectories + Jev, GPT-5 reads only where they disagree** (`route.py`) | held-out 630 | **89.8%** [87.5, 92.1] | GPT-5 reads 27.5% of the questions, once; 0 errors; ~13 cents per question |
 | The same | all 830 | 89.8% [87.7, 91.8] | 745 of 830 |
+| **The same with no frontier model: flash, reasoning on, is the routed reader** | held-out 630 | **89.8%** [87.5, 92.2] | 566 of 630, the same count as with GPT-5 though 19 of the 173 reads differ; ~10.5 cents per question; all 830: 89.3% |
 | **4 flash trajectories + Jev, no strong model** (`bestofn.py`) | held-out 630 | **87.0%** [84.4, 89.7] | the answer cluster with the largest summed strict score; ~10 cents per question |
 | One flash trajectory, ColBERT as a third index (`modal_app.py --colbert`) | held-out 630 | 81.0 - 82.5% | four runs; 0 errors |
 | DeepSeek-V4-flash + BM25 + Jev grading (first version) | all 830 | 55.8% | level with the paper's GPT-5 + BM25 row (55.9%) |
@@ -103,6 +104,11 @@ turn that into accuracy:
    the best 24 windows of every page any run read, graded by Jev. With GPT-5: 85.5% -> 89.5% on dev (fixed 9,
    broke 1). The control shows the gain is the reader and not the pooled evidence: flash doing the identical read
    scores 82.5% (fixed 5, broke 11). Showing GPT-5 the four answers does not help (89.0%).
+
+What the routed read needs is **reasoning at read time, not a frontier model**. The control above is flash with
+reasoning off, the setting the whole pipeline runs in. Flash with reasoning on (`--reasoning low`, ~6.7k output
+tokens, 0.14 cents a read) scores 87.5% on dev and 89.8% on the held-out 630: exactly GPT-5's count there
+(GPT-5 alone right on 10 of the routed questions, flash alone on 9, either on 138 of 173).
 
 GPT-5 as the whole agent costs 17.5 cents per question for one trajectory and was level with flash on a 30-question
 sample (26 vs 23-27 of 30); routed, it costs 2.2 cents per question on average.
